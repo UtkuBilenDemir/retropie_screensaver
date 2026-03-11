@@ -19,6 +19,7 @@ from metrics import (
     weekly_stats, historical_weeks, debt_summary,
     daily_target,
 )
+from rewards import load_state, check_goals, notify, Confetti
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG     = "#0d1117"
@@ -120,8 +121,10 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
     # Header
     fig.text(0.50, 0.97, today.strftime("%A  ·  %d %B %Y"),
              ha="center", color=TEXT, fontsize=18, fontweight="bold")
+    streak = data.get("streak", 0)
+    streak_str = f"  ·  {streak}d streak" if streak > 1 else ""
     fig.text(0.97, 0.97,
-             f"↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}",
+             f"↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}{streak_str}",
              ha="right", color=MUTED, fontsize=10)
 
     # ── TODAY ─────────────────────────────────────────────────────────────────
@@ -145,7 +148,8 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
     # Progress bar
     ax1.barh(4.2, 1.0,   height=1.8, color=TRACK, left=0, align="center")
     ax1.barh(4.2, pct,   height=1.8, color=dc,    left=0, align="center")
-    ax1.text(0.5, 4.2, f"{pct*100:.0f}%",
+    bar_label = "DONE" if pct >= 1.0 else f"{pct*100:.0f}%"
+    ax1.text(0.5, 4.2, bar_label,
              color=BG if pct > 0.12 else TEXT,
              fontsize=11, ha="center", va="center", fontweight="bold")
 
@@ -302,6 +306,7 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def main():
+    import os
     config  = load_config()
     dash    = config.get("dashboard", {})
     refresh_active = dash.get("refresh_active_seconds", 60)
@@ -309,6 +314,39 @@ def main():
     exit_btn       = dash.get("exit_button", 9)
     prev_btn       = dash.get("prev_screen_button", 6)
     next_btn       = dash.get("next_screen_button", 7)
+
+    # Rewards config — all off by default if section absent
+    rew_cfg    = config.get("rewards", {})
+    rew_on     = rew_cfg.get("enabled", False)
+    state_path = rew_cfg.get("state_path",
+                             os.path.join(os.path.dirname(__file__), "state.json"))
+    ntfy_topic = rew_cfg.get("ntfy_topic", "")
+    do_confetti = rew_cfg.get("confetti", True)
+    do_streak   = rew_cfg.get("streak", True)
+
+    rw_state = load_state(state_path) if rew_on else {}
+
+    def apply_rewards(d: dict) -> "Confetti | None":
+        """Check goals, update streak in data dict, fire ntfy, return confetti."""
+        if not rew_on:
+            return None
+        events = check_goals(rw_state, state_path, d["today"], d["debt"])
+        if do_streak:
+            d["streak"] = rw_state.get("streak", 0)
+        confetti = None
+        if events["daily"]:
+            if do_confetti:
+                confetti = Confetti(W, H)
+            if ntfy_topic:
+                notify(ntfy_topic, "Daily goal hit!",
+                       f"{fmt(d['debt']['today_actual'])} today"
+                       + (f" · {events['streak']}d streak" if events["streak"] > 1 else ""),
+                       tags="white_check_mark")
+        if events["weekly"] and ntfy_topic:
+            notify(ntfy_topic, "Weekly goal complete!",
+                   f"Week done" + (f" · {events['streak']}d streak" if events["streak"] > 1 else ""),
+                   tags="trophy")
+        return confetti
 
     # Screens registry — add more renderers here in the future
     screens = [render]
@@ -329,6 +367,7 @@ def main():
     pygame.display.flip()
 
     data    = fetch_data(config)
+    confetti_overlay = apply_rewards(data)
     surface = screens[screen_idx](data, W, H)
 
     pending    = [None]
@@ -387,8 +426,18 @@ def main():
             if pending[0]:
                 data, surface  = pending[0]
                 pending[0]     = None
+                new_confetti = apply_rewards(data)
+                if new_confetti:
+                    confetti_overlay = new_confetti
 
         screen.blit(surface, (0, 0))
+
+        if confetti_overlay:
+            confetti_overlay.update(1 / 30)
+            confetti_overlay.draw(screen)
+            if confetti_overlay.done:
+                confetti_overlay = None
+
         pygame.display.flip()
         clock.tick(30)
 
