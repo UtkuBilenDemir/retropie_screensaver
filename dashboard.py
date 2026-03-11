@@ -15,7 +15,7 @@ import yaml
 
 from toggl import TogglClient
 from metrics import (
-    week_start, hours_by_project,
+    week_start, hours_by_project, hours_by_project_per_day,
     weekly_stats, historical_weeks, debt_summary,
     daily_target,
 )
@@ -69,15 +69,19 @@ def fetch_data(config: dict) -> dict:
     entries  = client.time_entries(start, today)
     projects = client.projects()
 
+    ws = week_start(today)
+    week_dates = [ws + timedelta(days=i) for i in range(7)]
+
     return {
-        "today":          today,
-        "weekly":         weekly_stats(entries, tz, today),
-        "history":        historical_weeks(entries, tz, today, n_weeks=4),
-        "debt":           debt_summary(entries, tz, today),
-        "projects":       projects,
-        "projects_today": hours_by_project(entries, today, tz),
-        "timer_running":  client.timer_running,
-        "fetched_at":     time.time(),
+        "today":             today,
+        "weekly":            weekly_stats(entries, tz, today),
+        "weekly_by_project": hours_by_project_per_day(entries, tz, week_dates),
+        "history":           historical_weeks(entries, tz, today, n_weeks=4),
+        "debt":              debt_summary(entries, tz, today),
+        "projects":          projects,
+        "projects_today":    hours_by_project(entries, today, tz),
+        "timer_running":     client.timer_running,
+        "fetched_at":        time.time(),
     }
 
 
@@ -194,35 +198,76 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
     ax4 = fig.add_subplot(gs[0:2, 1])
     _style(ax4)
 
+    weekly_by_proj = data["weekly_by_project"]
+
     days     = [d["day"]    for d in weekly]
     actuals  = [d["actual"] for d in weekly]
     targets_ = [d["target"] for d in weekly]
-    colors   = []
+
+    # Collect all project IDs that appear this week, sorted by total hours
+    proj_week_totals: dict = {}
     for d in weekly:
-        if d["is_future"]:                        colors.append(TRACK)
-        elif d["is_today"]:                       colors.append(BLUE)
-        elif d["actual"] >= d["target"]:          colors.append(GREEN)
-        elif d["actual"] >= d["target"] * 0.75:   colors.append(ORANGE)
-        else:                                     colors.append(RED)
+        for pid, h in weekly_by_proj.get(d["date"], {}).items():
+            proj_week_totals[pid] = proj_week_totals.get(pid, 0.0) + h
+    sorted_pids = sorted(proj_week_totals, key=lambda p: proj_week_totals[p], reverse=True)
 
-    ax4.barh(range(7), actuals, color=colors, height=0.6)
+    def _proj_color(pid):
+        if pid is None: return MUTED
+        return projs.get(pid, {}).get("color", MUTED)
 
+    def _proj_name(pid):
+        if pid is None: return "No project"
+        return projs.get(pid, {}).get("name", str(pid))[:22]
+
+    # Stacked horizontal bars per day
+    for i, d in enumerate(weekly):
+        day_projs = weekly_by_proj.get(d["date"], {})
+        left = 0.0
+        for pid in sorted_pids:
+            h = day_projs.get(pid, 0.0)
+            if h > 0:
+                ax4.barh(i, h, left=left, height=0.6, color=_proj_color(pid))
+                left += h
+
+    # Target dash lines
     for i, tgt_h in enumerate(targets_):
         ax4.plot([tgt_h, tgt_h], [i - 0.38, i + 0.38],
-                 color=MUTED, linewidth=1.5, linestyle="--", zorder=3)
+                 color=TEXT, linewidth=1.5, linestyle="--", zorder=3)
 
     max_x = max(max(targets_) * 1.3, max(actuals + [0.1]) * 1.15)
+
+    # Total label after each bar
     for i, act in enumerate(actuals):
         if act > 0:
             ax4.text(act + max_x * 0.02, i, fmt(act), va="center", color=TEXT, fontsize=10)
 
-    ax4.set_yticks(range(7)); ax4.set_yticklabels(days, fontsize=12)
+    # Highlight today's y-tick label
+    yticklabels = []
+    for d in weekly:
+        if d["is_today"]:
+            yticklabels.append(f"► {d['day']}")
+        else:
+            yticklabels.append(d["day"])
+
+    ax4.set_yticks(range(7)); ax4.set_yticklabels(yticklabels, fontsize=12)
     ax4.invert_yaxis()
     ax4.set_xlim(0, max_x)
     ax4.set_xlabel("hours", fontsize=10, color=MUTED)
     ax4.set_title("THIS WEEK", color=MUTED, fontsize=10, loc="left", pad=6)
     ax4.tick_params(axis="y", colors=TEXT)
     ax4.grid(axis="x", color=BORDER, linewidth=0.5)
+
+    # Legend — project colors
+    from matplotlib.patches import Patch as _Patch
+    legend_handles = [
+        _Patch(facecolor=_proj_color(pid), label=_proj_name(pid))
+        for pid in sorted_pids
+    ]
+    if legend_handles:
+        ncol = 2 if len(legend_handles) > 4 else 1
+        ax4.legend(handles=legend_handles, fontsize=8, facecolor=CARD,
+                   labelcolor=TEXT, edgecolor=BORDER,
+                   loc="lower right", ncol=ncol)
 
     # ── PAST 4 WEEKS ──────────────────────────────────────────────────────────
     ax5 = fig.add_subplot(gs[2, 1])

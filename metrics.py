@@ -37,6 +37,17 @@ def hours_by_project(entries: list, d: date, tz: ZoneInfo) -> dict:
     return dict(totals)
 
 
+def hours_by_project_per_day(entries: list, tz: ZoneInfo, dates: list) -> dict:
+    """Returns {date: {project_id: hours}} for the given dates."""
+    date_set = set(dates)
+    totals: dict = {d: defaultdict(float) for d in date_set}
+    for e in entries:
+        d = _parse_date(e["start"], tz)
+        if d in date_set:
+            totals[d][e.get("project_id")] += e["_hours"]
+    return {d: dict(v) for d, v in totals.items()}
+
+
 def weekly_stats(entries: list, tz: ZoneInfo, today: date) -> list:
     """Per-day breakdown for the current Mon–Sun week."""
     ws = week_start(today)
