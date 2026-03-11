@@ -1,0 +1,355 @@
+import threading
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.patches import Rectangle
+import numpy as np
+import pygame
+import yaml
+
+from toggl import TogglClient
+from metrics import (
+    week_start, hours_by_project,
+    weekly_stats, historical_weeks, debt_summary,
+    daily_target,
+)
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+BG     = "#0d1117"
+CARD   = "#161b22"
+TEXT   = "#e6edf3"
+MUTED  = "#8b949e"
+GREEN  = "#3fb950"
+ORANGE = "#d29922"
+RED    = "#f85149"
+BLUE   = "#58a6ff"
+TRACK  = "#30363d"
+BORDER = "#21262d"
+
+
+def debt_color(debt: float) -> str:
+    if debt <= 0:   return GREEN
+    if debt < 1.0:  return ORANGE
+    return RED
+
+
+def fmt(h: float) -> str:
+    h = abs(h)
+    hours = int(h)
+    mins  = int(round((h - hours) * 60))
+    if mins == 60:
+        hours += 1; mins = 0
+    if hours == 0: return f"{mins}m"
+    if mins  == 0: return f"{hours}h"
+    return f"{hours}h {mins}m"
+
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+def load_config(path="/home/pi/Projects/dashboard/config.yaml"):
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def fetch_data(config: dict) -> dict:
+    from datetime import timedelta
+    token        = config["api"]["token"]
+    workspace_id = config["api"]["workspace_id"]
+    tz           = ZoneInfo(config["settings"].get("timezone", "Europe/Vienna"))
+
+    client  = TogglClient(token, workspace_id)
+    today   = datetime.now(tz).date()
+    start   = week_start(today) - timedelta(weeks=4)
+
+    entries  = client.time_entries(start, today)
+    projects = client.projects()
+
+    return {
+        "today":          today,
+        "weekly":         weekly_stats(entries, tz, today),
+        "history":        historical_weeks(entries, tz, today, n_weeks=4),
+        "debt":           debt_summary(entries, tz, today),
+        "projects":       projects,
+        "projects_today": hours_by_project(entries, today, tz),
+        "timer_running":  client.timer_running,
+        "fetched_at":     time.time(),
+    }
+
+
+# ── Rendering ─────────────────────────────────────────────────────────────────
+def _style(ax):
+    ax.set_facecolor(CARD)
+    for spine in ax.spines.values():
+        spine.set_color(BORDER)
+    ax.tick_params(colors=MUTED, labelsize=10)
+
+
+def render(data: dict, W: int, H: int) -> pygame.Surface:
+    matplotlib.rcParams.update({
+        "font.family":       "DejaVu Sans",
+        "text.color":        TEXT,
+        "figure.facecolor":  BG,
+        "axes.facecolor":    CARD,
+        "axes.edgecolor":    BORDER,
+    })
+
+    fig = plt.figure(figsize=(W / 100, H / 100), dpi=100)
+    gs  = gridspec.GridSpec(
+        3, 2, figure=fig,
+        left=0.04, right=0.97, top=0.91, bottom=0.06,
+        hspace=0.55, wspace=0.10,
+        height_ratios=[1.0, 2.5, 1.2],
+    )
+
+    debt    = data["debt"]
+    weekly  = data["weekly"]
+    history = data["history"]
+    projs   = data["projects"]
+    proj_t  = data["projects_today"]
+    today   = data["today"]
+
+    # Header
+    fig.text(0.50, 0.97, today.strftime("%A  ·  %d %B %Y"),
+             ha="center", color=TEXT, fontsize=18, fontweight="bold")
+    fig.text(0.97, 0.97,
+             f"↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}",
+             ha="right", color=MUTED, fontsize=10)
+
+    # ── TODAY ─────────────────────────────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, 0])
+    _style(ax1)
+    ax1.set_xlim(0, 1); ax1.set_ylim(0, 10); ax1.axis("off")
+
+    actual = debt["today_actual"]
+    tgt    = debt["today_target"]
+    dv     = debt["today_debt"]
+    dc     = debt_color(dv)
+    pct    = min(actual / tgt, 1.0) if tgt > 0 else 0
+    sign   = "−" if dv > 0 else "+"
+
+    ax1.text(0.02, 9.6, "TODAY",           color=MUTED, fontsize=9,  va="top")
+    ax1.text(0.02, 8.0, fmt(actual),       color=TEXT,  fontsize=30, va="top", fontweight="bold")
+    ax1.text(0.55, 7.4, f"/ {fmt(tgt)}",  color=MUTED, fontsize=14, va="top")
+    ax1.text(0.98, 8.0, f"{sign}{fmt(abs(dv))}",
+             color=dc, fontsize=13, va="top", ha="right")
+
+    # Progress bar
+    ax1.barh(4.2, 1.0,   height=1.8, color=TRACK, left=0, align="center")
+    ax1.barh(4.2, pct,   height=1.8, color=dc,    left=0, align="center")
+    ax1.text(0.5, 4.2, f"{pct*100:.0f}%",
+             color=BG if pct > 0.12 else TEXT,
+             fontsize=11, ha="center", va="center", fontweight="bold")
+
+    # ── PROJECTS TODAY ────────────────────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[1, 0])
+    _style(ax2)
+    ax2.axis("off")
+
+    ax2.text(0.02, 0.97, "PROJECTS TODAY",
+             color=MUTED, fontsize=9, va="top", transform=ax2.transAxes)
+
+    sorted_p = sorted(proj_t.items(), key=lambda x: x[1], reverse=True)[:6]
+    max_h    = max((h for _, h in sorted_p), default=tgt or 1.0)
+
+    for i, (pid, hours) in enumerate(sorted_p):
+        info   = projs.get(pid, {}) if pid else {}
+        pname  = info.get("name", "—")[:22]
+        pcolor = info.get("color", MUTED)
+        y      = 0.86 - i * 0.145
+
+        ax2.text(0.02, y, pname,     color=TEXT,  fontsize=11, va="center", transform=ax2.transAxes)
+        ax2.text(0.44, y, fmt(hours), color=MUTED, fontsize=11, va="center",
+                 ha="right", transform=ax2.transAxes)
+
+        bar_w = (hours / max(max_h, 0.1)) * 0.52
+        ax2.add_patch(Rectangle(
+            (0.46, y - 0.05), bar_w, 0.10,
+            color=pcolor, transform=ax2.transAxes, clip_on=True,
+        ))
+
+    # ── DEBT ──────────────────────────────────────────────────────────────────
+    ax3 = fig.add_subplot(gs[2, 0])
+    _style(ax3)
+    ax3.set_xlim(0, 1); ax3.set_ylim(0, 10); ax3.axis("off")
+
+    ax3.text(0.02, 9.5, "DEBT", color=MUTED, fontsize=9, va="top")
+
+    wv    = debt["week_debt"]
+    wsign = "−" if wv > 0 else "+"
+
+    ax3.text(0.02, 5.8, "Today",             color=MUTED, fontsize=11, va="center")
+    ax3.text(0.02, 3.2, f"{sign}{fmt(abs(dv))}",
+             color=dc, fontsize=22, fontweight="bold", va="center")
+
+    ax3.text(0.52, 5.8, "This Week",         color=MUTED, fontsize=11, va="center")
+    ax3.text(0.52, 3.2, f"{wsign}{fmt(abs(wv))}",
+             color=debt_color(wv), fontsize=22, fontweight="bold", va="center")
+
+    # ── WEEK CHART ────────────────────────────────────────────────────────────
+    ax4 = fig.add_subplot(gs[0:2, 1])
+    _style(ax4)
+
+    days     = [d["day"]    for d in weekly]
+    actuals  = [d["actual"] for d in weekly]
+    targets_ = [d["target"] for d in weekly]
+    colors   = []
+    for d in weekly:
+        if d["is_future"]:                        colors.append(TRACK)
+        elif d["is_today"]:                       colors.append(BLUE)
+        elif d["actual"] >= d["target"]:          colors.append(GREEN)
+        elif d["actual"] >= d["target"] * 0.75:   colors.append(ORANGE)
+        else:                                     colors.append(RED)
+
+    ax4.barh(range(7), actuals, color=colors, height=0.6)
+
+    for i, tgt_h in enumerate(targets_):
+        ax4.plot([tgt_h, tgt_h], [i - 0.38, i + 0.38],
+                 color=MUTED, linewidth=1.5, linestyle="--", zorder=3)
+
+    max_x = max(max(targets_) * 1.3, max(actuals + [0.1]) * 1.15)
+    for i, act in enumerate(actuals):
+        if act > 0:
+            ax4.text(act + max_x * 0.02, i, fmt(act), va="center", color=TEXT, fontsize=10)
+
+    ax4.set_yticks(range(7)); ax4.set_yticklabels(days, fontsize=12)
+    ax4.invert_yaxis()
+    ax4.set_xlim(0, max_x)
+    ax4.set_xlabel("hours", fontsize=10, color=MUTED)
+    ax4.set_title("THIS WEEK", color=MUTED, fontsize=10, loc="left", pad=6)
+    ax4.tick_params(axis="y", colors=TEXT)
+    ax4.grid(axis="x", color=BORDER, linewidth=0.5)
+
+    # ── PAST 4 WEEKS ──────────────────────────────────────────────────────────
+    ax5 = fig.add_subplot(gs[2, 1])
+    _style(ax5)
+
+    labels   = [w["label"]  for w in history]
+    h_actual = [w["actual"] for w in history]
+    h_target = [w["target"] for w in history]
+    x        = np.arange(len(labels))
+    bw       = 0.35
+
+    ax5.bar(x - bw / 2, h_actual, bw, label="Actual", color=[
+        GREEN if a >= t else ORANGE if a >= t * 0.75 else RED
+        for a, t in zip(h_actual, h_target)
+    ])
+    ax5.bar(x + bw / 2, h_target, bw, label="Target", color=TRACK)
+
+    ax5.set_xticks(x); ax5.set_xticklabels(labels, fontsize=9)
+    ax5.set_title("PAST 4 WEEKS", color=MUTED, fontsize=10, loc="left", pad=6)
+    ax5.tick_params(axis="x", colors=TEXT)
+    ax5.grid(axis="y", color=BORDER, linewidth=0.5)
+    ax5.legend(fontsize=9, facecolor=CARD, labelcolor=MUTED,
+               edgecolor=BORDER, loc="upper left")
+
+    # ── Bake to pygame surface ────────────────────────────────────────────────
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    surf = pygame.image.frombuffer(canvas.buffer_rgba(), (W, H), "RGBA")
+    plt.close(fig)
+    return surf
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+def main():
+    config  = load_config()
+    dash    = config.get("dashboard", {})
+    refresh_active = dash.get("refresh_active_seconds", 60)
+    refresh_idle   = dash.get("refresh_idle_seconds", 300)
+    exit_btn       = dash.get("exit_button", 9)
+    prev_btn       = dash.get("prev_screen_button", 6)
+    next_btn       = dash.get("next_screen_button", 7)
+
+    # Screens registry — add more renderers here in the future
+    screens = [render]
+    screen_idx = 0
+
+    pygame.init()
+    pygame.joystick.init()
+
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+    W, H   = screen.get_size()
+    clock  = pygame.time.Clock()
+
+    # Loading screen
+    screen.fill((13, 17, 23))
+    f   = pygame.font.Font(None, 52)
+    txt = f.render("Loading...", True, (230, 237, 243))
+    screen.blit(txt, txt.get_rect(center=(W // 2, H // 2)))
+    pygame.display.flip()
+
+    data    = fetch_data(config)
+    surface = screens[screen_idx](data, W, H)
+
+    pending    = [None]
+    lock       = threading.Lock()
+    stop_event = threading.Event()
+
+    def bg_refresh():
+        while not stop_event.is_set():
+            with lock:
+                timer_running = data.get("timer_running", False)
+            interval = refresh_active if timer_running else refresh_idle
+            stop_event.wait(interval)
+            if stop_event.is_set():
+                break
+            try:
+                d = fetch_data(config)
+                s = screens[screen_idx](d, W, H)
+                with lock:
+                    pending[0] = (d, s)
+            except Exception as e:
+                print(f"[refresh] {e}")
+
+    threading.Thread(target=bg_refresh, daemon=True).start()
+
+    joysticks = {}
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.JOYDEVICEADDED:
+                joy = pygame.joystick.Joystick(event.device_index)
+                joysticks[joy.get_instance_id()] = joy
+
+            elif event.type == pygame.JOYDEVICEREMOVED:
+                joysticks.pop(event.instance_id, None)
+
+            elif event.type == pygame.JOYBUTTONDOWN:
+                if event.button == exit_btn:
+                    running = False
+                elif event.button == next_btn:
+                    screen_idx = (screen_idx + 1) % len(screens)
+                    with lock:
+                        pending[0] = (data, screens[screen_idx](data, W, H))
+                elif event.button == prev_btn:
+                    screen_idx = (screen_idx - 1) % len(screens)
+                    with lock:
+                        pending[0] = (data, screens[screen_idx](data, W, H))
+
+            elif event.type == pygame.KEYDOWN:
+                running = False
+
+            elif event.type == pygame.QUIT:
+                running = False
+
+        with lock:
+            if pending[0]:
+                data, surface  = pending[0]
+                pending[0]     = None
+
+        screen.blit(surface, (0, 0))
+        pygame.display.flip()
+        clock.tick(30)
+
+    stop_event.set()
+    pygame.quit()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,7 @@
+config.yaml
+.claude/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+uv.lock

@@ -1,0 +1,15 @@
+api:
+  token: YOUR_TOGGL_API_TOKEN        # Settings → Profile → API Token
+  workspace_id: YOUR_WORKSPACE_ID   # Settings → Workspaces → click workspace → ID in URL
+  base_url: https://api.track.toggl.com/api/v9
+
+settings:
+  max_date_range_days: 365
+
+dashboard:
+  timezone: Europe/Vienna            # your local timezone (IANA format)
+  refresh_active_seconds: 60        # poll interval when a timer is running
+  refresh_idle_seconds: 300         # poll interval when no timer is running
+  exit_button: 9                    # gamepad button to dismiss and return to ES
+  prev_screen_button: 6             # L1/LB — previous screen
+  next_screen_button: 7             # R1/RB — next screen
