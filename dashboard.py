@@ -20,6 +20,11 @@ from metrics import (
     daily_target,
 )
 from rewards import load_state, check_goals, notify, Confetti
+from energy import (
+    parse_gas, parse_elec, periods, current_period,
+    gas_cost, elec_cost, gas_projection, elec_projection,
+    GAS_KWH_PER_M3,
+)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG     = "#0d1117"
@@ -83,6 +88,7 @@ def fetch_data(config: dict) -> dict:
         "projects_today":    hours_by_project(entries, today, tz),
         "timer_running":     client.timer_running,
         "fetched_at":        time.time(),
+        "energy_cfg":        config.get("energy", {}),
     }
 
 
@@ -304,6 +310,161 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
     return surf
 
 
+# ── Energy screen ─────────────────────────────────────────────────────────────
+def render_energy(data: dict, W: int, H: int) -> pygame.Surface:
+    matplotlib.rcParams.update({
+        "font.family":       "DejaVu Sans",
+        "text.color":        TEXT,
+        "figure.facecolor":  BG,
+        "axes.facecolor":    CARD,
+        "axes.edgecolor":    BORDER,
+    })
+
+    fig = plt.figure(figsize=(W / 100, H / 100), dpi=100)
+    gs  = gridspec.GridSpec(
+        2, 2, figure=fig,
+        left=0.05, right=0.97, top=0.91, bottom=0.08,
+        hspace=0.45, wspace=0.12,
+        height_ratios=[1.0, 1.6],
+    )
+
+    today   = data["today"]
+    ecfg    = data.get("energy_cfg", {})
+    tariffs = ecfg.get("tariffs", {})
+    kwh_m3  = ecfg.get("gas_kwh_per_m3", GAS_KWH_PER_M3)
+
+    gas_t  = tariffs.get("gas",         {"price_cents_per_kwh": 7.89,  "base_fee_per_year_eur": 23.86})
+    elec_t = tariffs.get("electricity", {"price_cents_per_kwh": 17.89, "base_fee_per_year_eur": 23.73})
+
+    gas_entries  = parse_gas(ecfg.get("readings", {}).get("gas",         {}).get("entries", []))
+    elec_entries = parse_elec(ecfg.get("readings", {}).get("electricity", {}).get("entries", []))
+
+    gas_cur  = current_period(gas_entries,  today)
+    elec_cur = current_period(elec_entries, today)
+
+    # Header
+    fig.text(0.50, 0.97, "ENERGY", ha="center", color=TEXT, fontsize=18, fontweight="bold")
+    fig.text(0.97, 0.97,
+             f"↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}",
+             ha="right", color=MUTED, fontsize=10)
+
+    # ── GAS summary ───────────────────────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, 0])
+    _style(ax1)
+    ax1.set_xlim(0, 1); ax1.set_ylim(0, 10); ax1.axis("off")
+    ax1.text(0.02, 9.6, "GAS", color=MUTED, fontsize=9, va="top")
+
+    if gas_cur:
+        est_m3   = gas_cur["estimated"]
+        est_cost = gas_cost(est_m3, gas_cur["days_since"], gas_t, kwh_m3)
+        proj     = gas_projection(gas_cur["rate"], gas_t, kwh_m3)
+
+        ax1.text(0.02, 8.7,
+                 f"Last reading: {gas_cur['last_reading']:,} m\u00b3"
+                 f"  ({gas_cur['last_date'].strftime('%-d %b %Y')})",
+                 color=TEXT, fontsize=11, va="top")
+        ax1.text(0.02, 7.4,
+                 f"Est. since:  +{est_m3:.0f} m\u00b3  \u2248 \u20ac{est_cost:.0f}",
+                 color=TEXT, fontsize=11, va="top")
+        ax1.text(0.02, 6.1,
+                 f"Rate: {gas_cur['rate']:.2f} m\u00b3/day"
+                 f"  ({gas_cur['rate'] * kwh_m3:.1f} kWh/day)",
+                 color=MUTED, fontsize=10, va="top")
+        ax1.text(0.02, 4.8, f"\u20ac{proj:.0f} / year",
+                 color=BLUE, fontsize=20, va="top", fontweight="bold")
+        ax1.text(0.02, 3.2,
+                 f"{gas_t['price_cents_per_kwh']} ct/kWh  +  "
+                 f"\u20ac{gas_t['base_fee_per_year_eur']:.2f} base/yr",
+                 color=MUTED, fontsize=9, va="top")
+    else:
+        ax1.text(0.02, 6.0, "No readings yet", color=MUTED, fontsize=12, va="top")
+
+    # ── ELECTRICITY summary ───────────────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[0, 1])
+    _style(ax2)
+    ax2.set_xlim(0, 1); ax2.set_ylim(0, 10); ax2.axis("off")
+    ax2.text(0.02, 9.6, "ELECTRICITY", color=MUTED, fontsize=9, va="top")
+
+    if elec_cur:
+        est_kwh   = elec_cur["estimated"]
+        est_cost2 = elec_cost(est_kwh, elec_cur["days_since"], elec_t)
+        proj2     = elec_projection(elec_cur["rate"], elec_t)
+
+        ax2.text(0.02, 8.7,
+                 f"Last reading: {elec_cur['last_reading']:,} kWh"
+                 f"  ({elec_cur['last_date'].strftime('%-d %b %Y')})",
+                 color=TEXT, fontsize=11, va="top")
+        ax2.text(0.02, 7.4,
+                 f"Est. since:  +{est_kwh:.0f} kWh  \u2248 \u20ac{est_cost2:.0f}",
+                 color=TEXT, fontsize=11, va="top")
+        ax2.text(0.02, 6.1,
+                 f"Rate: {elec_cur['rate']:.2f} kWh/day",
+                 color=MUTED, fontsize=10, va="top")
+        ax2.text(0.02, 4.8, f"\u20ac{proj2:.0f} / year",
+                 color=BLUE, fontsize=20, va="top", fontweight="bold")
+        ax2.text(0.02, 3.2,
+                 f"{elec_t['price_cents_per_kwh']} ct/kWh  +  "
+                 f"\u20ac{elec_t['base_fee_per_year_eur']:.2f} base/yr",
+                 color=MUTED, fontsize=9, va="top")
+    else:
+        ax2.text(0.02, 6.0, "No readings yet", color=MUTED, fontsize=12, va="top")
+
+    # ── Historical gas chart ──────────────────────────────────────────────────
+    ax3 = fig.add_subplot(gs[1, :])
+    _style(ax3)
+
+    gas_periods = periods(gas_entries)
+    if gas_periods:
+        labels = [
+            f"{p['start'].strftime('%-d %b %y')}\n{p['end'].strftime('%-d %b %y')}"
+            for p in gas_periods
+        ]
+        values = [p["per_day"] for p in gas_periods]
+        bar_colors = [ORANGE if p["disputed"] else BLUE for p in gas_periods]
+
+        x = np.arange(len(labels))
+        bars = ax3.bar(x, values, color=bar_colors, width=0.55)
+
+        for bar, p in zip(bars, gas_periods):
+            label = f"{p['consumed']:.0f} m\u00b3\n({p['days']}d)"
+            if p["disputed"]:
+                label += "\n\u26a0 disputed"
+            ax3.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(values) * 0.02,
+                label, ha="center", va="bottom",
+                color=ORANGE if p["disputed"] else TEXT, fontsize=9,
+            )
+
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(labels, fontsize=9)
+        ax3.tick_params(axis="x", colors=TEXT)
+        ax3.set_ylabel("m\u00b3 / day", color=MUTED, fontsize=9)
+        ax3.set_title("GAS — consumption per period (normalized)",
+                      color=MUTED, fontsize=10, loc="left", pad=6)
+        ax3.grid(axis="y", color=BORDER, linewidth=0.5)
+
+        from matplotlib.patches import Patch as _Patch
+        ax3.legend(
+            handles=[_Patch(facecolor=BLUE, label="Measured"),
+                     _Patch(facecolor=ORANGE, label="Disputed")],
+            fontsize=9, facecolor=CARD, labelcolor=MUTED,
+            edgecolor=BORDER, loc="upper right",
+        )
+    else:
+        ax3.text(0.5, 0.5, "Add readings to config.yaml",
+                 ha="center", va="center", color=MUTED, fontsize=14,
+                 transform=ax3.transAxes)
+        ax3.axis("off")
+
+    # Bake to pygame surface
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    surf = pygame.image.frombuffer(canvas.buffer_rgba(), (W, H), "RGBA")
+    plt.close(fig)
+    return surf
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def main():
     import os
@@ -325,6 +486,33 @@ def main():
     do_streak   = rew_cfg.get("streak", True)
 
     rw_state = load_state(state_path) if rew_on else {}
+    reminder_day = config.get("energy", {}).get("reminder_day_of_month", 1)
+
+    def check_meter_reminder(d: dict) -> None:
+        """Send a monthly ntfy nudge to read the meters."""
+        t = d["today"]
+        if not ntfy_topic or t.day != reminder_day:
+            return
+        month_key = t.strftime("%Y-%m")
+        if rw_state.get("last_meter_reminder") == month_key:
+            return
+        ecfg = d.get("energy_cfg", {})
+        gas_entries  = parse_gas(ecfg.get("readings", {}).get("gas",         {}).get("entries", []))
+        elec_entries = parse_elec(ecfg.get("readings", {}).get("electricity", {}).get("entries", []))
+        parts = []
+        if gas_entries:
+            last = gas_entries[-1]
+            days = (t - last["date"]).days
+            parts.append(f"Gas: {last['reading']:,} m\u00b3 ({days}d ago)")
+        if elec_entries:
+            last = elec_entries[-1]
+            days = (t - last["date"]).days
+            parts.append(f"Electricity: {last['reading']:,} kWh ({days}d ago)")
+        body = "Time to read your meters!\n" + "\n".join(parts)
+        notify(ntfy_topic, "Meter reading reminder", body, tags="electric_plug")
+        rw_state["last_meter_reminder"] = month_key
+        from rewards import save_state
+        save_state(state_path, rw_state)
 
     def apply_rewards(d: dict) -> "Confetti | None":
         """Check goals, update streak in data dict, fire ntfy, return confetti."""
@@ -348,8 +536,8 @@ def main():
                    tags="trophy")
         return confetti
 
-    # Screens registry — add more renderers here in the future
-    screens = [render]
+    # Screens registry
+    screens = [render, render_energy]
     screen_idx = 0
 
     pygame.init()
@@ -368,6 +556,7 @@ def main():
 
     data    = fetch_data(config)
     confetti_overlay = apply_rewards(data)
+    check_meter_reminder(data)
     surface = screens[screen_idx](data, W, H)
 
     pending    = [None]
