@@ -62,6 +62,28 @@ def load_config(path="/home/pi/Projects/dashboard/config.yaml"):
         return yaml.safe_load(f)
 
 
+import os as _os
+import pickle as _pickle
+
+def _cache_path(config: dict) -> str:
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    return _os.path.join(base, "data_cache.pkl")
+
+def _save_cache(data: dict, config: dict) -> None:
+    try:
+        with open(_cache_path(config), "wb") as f:
+            _pickle.dump(data, f)
+    except Exception as e:
+        print(f"[cache] save failed: {e}", flush=True)
+
+def _load_cache(config: dict) -> dict | None:
+    try:
+        with open(_cache_path(config), "rb") as f:
+            return _pickle.load(f)
+    except Exception:
+        return None
+
+
 def fetch_data(config: dict) -> dict:
     from datetime import timedelta
     token        = config["api"]["token"]
@@ -78,7 +100,7 @@ def fetch_data(config: dict) -> dict:
     ws = week_start(today)
     week_dates = [ws + timedelta(days=i) for i in range(7)]
 
-    return {
+    data = {
         "today":             today,
         "weekly":            weekly_stats(entries, tz, today),
         "weekly_by_project": hours_by_project_per_day(entries, tz, week_dates),
@@ -90,6 +112,41 @@ def fetch_data(config: dict) -> dict:
         "fetched_at":        time.time(),
         "energy_cfg":        config.get("energy", {}),
     }
+    _save_cache(data, config)
+    return data
+
+
+def fetch_data_with_fallback(config: dict) -> dict:
+    """Fetch from API; fall back to cached data, then to empty stub."""
+    try:
+        return fetch_data(config)
+    except Exception as e:
+        print(f"[fetch] API error: {e}", flush=True)
+        cached = _load_cache(config)
+        if cached is not None:
+            print("[fetch] using cached data", flush=True)
+            cached["api_error"]  = str(e)
+            cached["energy_cfg"] = config.get("energy", {})
+            return cached
+        # No cache — return a minimal stub so the dashboard doesn't crash
+        print("[fetch] no cache, using empty stub", flush=True)
+        from datetime import date
+        from metrics import daily_target
+        today = date.today()
+        return {
+            "today":             today,
+            "weekly":            [],
+            "weekly_by_project": {},
+            "history":           [],
+            "debt":              {"today_actual": 0, "today_target": daily_target(today),
+                                  "today_debt": daily_target(today), "week_debt": 0},
+            "projects":          {},
+            "projects_today":    {},
+            "timer_running":     False,
+            "fetched_at":        time.time(),
+            "energy_cfg":        config.get("energy", {}),
+            "api_error":         str(e),
+        }
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
@@ -129,9 +186,10 @@ def render(data: dict, W: int, H: int) -> pygame.Surface:
              ha="center", color=TEXT, fontsize=18, fontweight="bold")
     streak = data.get("streak", 0)
     streak_str = f"  ·  {streak}d streak" if streak > 1 else ""
+    api_err = data.get("api_error")
     fig.text(0.97, 0.97,
-             f"↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}{streak_str}",
-             ha="right", color=MUTED, fontsize=10)
+             f"{'⚠ cached  ' if api_err else ''}↻ {time.strftime('%H:%M', time.localtime(data['fetched_at']))}{streak_str}",
+             ha="right", color=ORANGE if api_err else MUTED, fontsize=10)
 
     # ── TODAY ─────────────────────────────────────────────────────────────────
     ax1 = fig.add_subplot(gs[0, 0])
@@ -322,9 +380,9 @@ def render_energy(data: dict, W: int, H: int) -> pygame.Surface:
 
     fig = plt.figure(figsize=(W / 100, H / 100), dpi=100)
     gs  = gridspec.GridSpec(
-        2, 2, figure=fig,
-        left=0.05, right=0.97, top=0.91, bottom=0.08,
-        hspace=0.45, wspace=0.12,
+        2, 3, figure=fig,
+        left=0.04, right=0.97, top=0.91, bottom=0.08,
+        hspace=0.45, wspace=0.14,
         height_ratios=[1.0, 1.6],
     )
 
@@ -379,8 +437,33 @@ def render_energy(data: dict, W: int, H: int) -> pygame.Surface:
     else:
         ax1.text(0.02, 6.0, "No readings yet", color=MUTED, fontsize=12, va="top")
 
+    # ── COMBINED total ────────────────────────────────────────────────────────
+    ax_mid = fig.add_subplot(gs[0, 1])
+    _style(ax_mid)
+    ax_mid.set_xlim(0, 1); ax_mid.set_ylim(0, 10); ax_mid.axis("off")
+    ax_mid.text(0.5, 9.6, "TOTAL", color=MUTED, fontsize=9, va="top", ha="center")
+
+    proj_gas  = gas_projection(gas_cur["rate"],  gas_t,  kwh_m3) if gas_cur  else 0.0
+    proj_elec = elec_projection(elec_cur["rate"], elec_t)         if elec_cur else 0.0
+    proj_total = proj_gas + proj_elec
+    teilbetrag = proj_total / 10
+
+    ax_mid.text(0.5, 8.0, f"\u20ac{proj_total:.0f}", color=TEXT,  fontsize=32,
+                va="top", ha="center", fontweight="bold")
+    ax_mid.text(0.5, 5.6, "per year", color=MUTED, fontsize=11, va="top", ha="center")
+
+    ax_mid.add_patch(__import__("matplotlib.patches", fromlist=["FancyBboxPatch"])
+                     .FancyBboxPatch((0.1, 2.2), 0.8, 1.8,
+                                     boxstyle="round,pad=0.05",
+                                     facecolor=CARD, edgecolor=BORDER,
+                                     transform=ax_mid.transData))
+    ax_mid.text(0.5, 4.0, f"\u20ac{teilbetrag:.0f}",
+                color=BLUE, fontsize=22, va="top", ha="center", fontweight="bold")
+    ax_mid.text(0.5, 2.5, "per Teilbetrag  \u00d7 10",
+                color=MUTED, fontsize=9,  va="top", ha="center")
+
     # ── ELECTRICITY summary ───────────────────────────────────────────────────
-    ax2 = fig.add_subplot(gs[0, 1])
+    ax2 = fig.add_subplot(gs[0, 2])
     _style(ax2)
     ax2.set_xlim(0, 1); ax2.set_ylim(0, 10); ax2.axis("off")
     ax2.text(0.02, 9.6, "ELECTRICITY", color=MUTED, fontsize=9, va="top")
@@ -410,7 +493,7 @@ def render_energy(data: dict, W: int, H: int) -> pygame.Surface:
         ax2.text(0.02, 6.0, "No readings yet", color=MUTED, fontsize=12, va="top")
 
     # ── Historical gas chart ──────────────────────────────────────────────────
-    ax3 = fig.add_subplot(gs[1, :])
+    ax3 = fig.add_subplot(gs[1, 0:3])
     _style(ax3)
 
     gas_periods = periods(gas_entries)
@@ -554,7 +637,7 @@ def main():
     screen.blit(txt, txt.get_rect(center=(W // 2, H // 2)))
     pygame.display.flip()
 
-    data    = fetch_data(config)
+    data    = fetch_data_with_fallback(config)
     confetti_overlay = apply_rewards(data)
     check_meter_reminder(data)
     surface = screens[screen_idx](data, W, H)
@@ -572,7 +655,7 @@ def main():
             if stop_event.is_set():
                 break
             try:
-                d = fetch_data(config)
+                d = fetch_data_with_fallback(config)
                 s = screens[screen_idx](d, W, H)
                 with lock:
                     pending[0] = (d, s)
@@ -594,6 +677,7 @@ def main():
                 joysticks.pop(event.instance_id, None)
 
             elif event.type == pygame.JOYBUTTONDOWN:
+                print(f"[btn] {event.button}", flush=True)
                 if event.button == exit_btn:
                     running = False
                 elif event.button == next_btn:
