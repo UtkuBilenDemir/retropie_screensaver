@@ -25,6 +25,7 @@ from energy import (
     gas_cost, elec_cost, gas_projection, elec_projection,
     GAS_KWH_PER_M3,
 )
+from career import render_career
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 BG     = "#0d1117"
@@ -620,7 +621,7 @@ def main():
         return confetti
 
     # Screens registry
-    screens = [render, render_energy]
+    screens = [render, render_energy, render_career]
     screen_idx = 0
 
     pygame.init()

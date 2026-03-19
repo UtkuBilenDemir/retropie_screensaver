@@ -16,7 +16,7 @@ while true; do
         echo "[supervisor] screensaver triggered — launching dashboard"
         rm -f "$TRIGGER"
         cd "$DASHBOARD_DIR"
-        python3 dashboard.py > /tmp/supervisor.log 2>&1
+        python3 -u dashboard.py > /tmp/supervisor.log 2>&1
         echo "[supervisor] dashboard exited"
     else
         echo "[supervisor] ES exited normally — restarting"
