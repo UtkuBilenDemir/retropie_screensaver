@@ -376,7 +376,8 @@ def render_career(data: dict, W: int, H: int) -> pygame.Surface:
         if not items_s:
             continue
 
-        name, color = STATUS_NODE[s]
+        name  = STATUS_META[s]["label"]
+        color = STATUS_META[s]["color"]
         ax_l.text(0.04, y, name.upper(), color=color, fontsize=9,
                   fontweight="bold", va="top", transform=ax_l.transAxes)
         y -= row_h * 0.85
