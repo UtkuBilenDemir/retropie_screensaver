@@ -34,13 +34,12 @@ BLUE   = "#58a6ff"
 BORDER = "#21262d"
 TRACK  = "#30363d"
 
-VAULT_ROOT = Path("/home/pi/Library/Mobile Documents/iCloud~md~obsidian/Documents/rhizome")
-NOTE_PATH  = VAULT_ROOT / "02_zettelkasten" / "Career Pursuit.md"
+NOTE_PATH = Path("/home/pi/Projects/rhizome/02_zettelkasten/Career Pursuit.md")
 
 # Fallback for local dev on macOS
-_MAC_ROOT  = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/rhizome"
-if not VAULT_ROOT.exists() and _MAC_ROOT.exists():
-    NOTE_PATH = _MAC_ROOT / "02_zettelkasten" / "Career Pursuit.md"
+_MAC_NOTE = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/rhizome" / "02_zettelkasten" / "Career Pursuit.md"
+if not NOTE_PATH.exists() and _MAC_NOTE.exists():
+    NOTE_PATH = _MAC_NOTE
 
 
 # ── Status config ──────────────────────────────────────────────────────────────
@@ -215,37 +214,32 @@ def _draw_legend(ax, items: list, x: float, y: float):
 
 # ── Main render function ───────────────────────────────────────────────────────
 def render_career(data: dict, W: int, H: int) -> pygame.Surface:
-    """
-    Render the Career Pursuit screen.
-    `data` is the shared data dict from fetch_data; this screen doesn't need it
-    but receives it for API consistency.
-    """
+    from sankeyflow import Sankey as _Sankey
+
     matplotlib.rcParams.update({
         "font.family":      "DejaVu Sans",
         "text.color":       TEXT,
         "figure.facecolor": BG,
-        "axes.facecolor":   CARD,
+        "axes.facecolor":   BG,
         "axes.edgecolor":   BORDER,
     })
 
-    career = parse_career_note()
+    career    = parse_career_note()
     job_items = career.get("job", [])
     phd_items = career.get("phd", [])
     error     = career.get("error")
 
     fig = plt.figure(figsize=(W / 100, H / 100), dpi=100)
+    fig.patch.set_facecolor(BG)
 
-    # ── Header ────────────────────────────────────────────────────────────────
     fig.text(0.50, 0.97, "CAREER PURSUIT",
              ha="center", color=TEXT, fontsize=18, fontweight="bold")
-    fig.text(0.97, 0.97,
-             f"↻ {time.strftime('%H:%M')}",
+    fig.text(0.97, 0.97, f"↻ {time.strftime('%H:%M')}",
              ha="right", color=MUTED, fontsize=10)
 
     if error:
         ax = fig.add_axes([0.05, 0.1, 0.9, 0.8])
-        ax.axis("off")
-        ax.set_facecolor(BG)
+        ax.axis("off"); ax.set_facecolor(BG)
         ax.text(0.5, 0.5, error, ha="center", va="center",
                 color=RED, fontsize=14, transform=ax.transAxes)
         canvas = FigureCanvasAgg(fig)
@@ -254,61 +248,162 @@ def render_career(data: dict, W: int, H: int) -> pygame.Surface:
         plt.close(fig)
         return surf
 
-    # ── Two-column layout ──────────────────────────────────────────────────────
-    gs = gridspec.GridSpec(
-        1, 2, figure=fig,
-        left=0.03, right=0.98, top=0.88, bottom=0.04,
-        hspace=0.0, wspace=0.06,
-    )
+    # ── Count by status ────────────────────────────────────────────────────────
+    def _counts(items):
+        c = {" ": 0, "/": 0, "-": 0, "x": 0}
+        for item in items:
+            if item["status"] in c:
+                c[item["status"]] += 1
+        return c
 
-    ax_job = fig.add_subplot(gs[0, 0])
-    ax_phd = fig.add_subplot(gs[0, 1])
+    jc = _counts(job_items)
+    pc = _counts(phd_items)
 
-    for ax in (ax_job, ax_phd):
-        ax.set_facecolor(CARD)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-        for spine in ax.spines.values():
-            spine.set_color(BORDER)
+    job_total = sum(jc.values())
+    phd_total = sum(pc.values())
 
-    ROW_H   = 0.068   # fraction of axes height per row
-    MAX_JOB = 11
-    MAX_PHD = 11
+    C_JOB  = ORANGE    # #d29922
+    C_PHD  = "#a371f7" # purple
+    C_APPL = BLUE      # #58a6ff  applied/sent
+    C_TODO = MUTED     # #8b949e  not yet sent
+    C_IDLE = "#6e7681" # darker muted — pending response
+    C_REJ  = RED       # #f85149  rejected
+    C_ACC  = GREEN     # #3fb950  accepted
 
-    # ── JOB column ────────────────────────────────────────────────────────────
-    job_counts = _status_counts(job_items)
-    job_subtitle = (
-        f"{job_counts.get('/', 0)} applied  ·  "
-        f"{job_counts.get(' ', 0)} todo  ·  "
-        f"{job_counts.get('-', 0)} rejected  ·  "
-        f"{job_counts.get('x', 0)} accepted"
-    )
-    ax_job.text(0.01, 0.97, "JOB",
-                color=TEXT, fontsize=14, fontweight="bold",
-                va="top", transform=ax_job.transAxes)
-    ax_job.text(0.01, 0.91, job_subtitle,
-                color=MUTED, fontsize=8,
-                va="top", transform=ax_job.transAxes)
+    # ── Derived counts ─────────────────────────────────────────────────────────
+    # "Applied" (level 1) = everything that has been sent: "/" + "-" + "x"
+    j_sent = jc["/"] + jc["-"] + jc["x"]
+    p_sent = pc["/"] + pc["-"] + pc["x"]
+    total_sent     = j_sent + p_sent
+    total_idle     = jc["/"] + pc["/"]   # sent but still waiting
+    total_rejected = jc["-"] + pc["-"]
+    total_accepted = jc["x"] + pc["x"]
+    total_todo     = jc[" "] + pc[" "]
 
-    _draw_section(ax_job, job_items, "", 0.83, ROW_H, MAX_JOB)
+    # ── Build Sankey nodes & flows ─────────────────────────────────────────────
+    level0 = []
+    if job_total > 0:
+        level0.append(("Job", job_total,
+                        {"color": C_JOB, "label_pos": "left",
+                         "label_format": "Job\n{value:.0f} total"}))
+    if phd_total > 0:
+        level0.append(("PhD", phd_total,
+                        {"color": C_PHD, "label_pos": "left",
+                         "label_format": "PhD\n{value:.0f} total"}))
 
-    # ── PhD column ────────────────────────────────────────────────────────────
-    phd_counts = _status_counts(phd_items)
-    phd_subtitle = (
-        f"{phd_counts.get('/', 0)} applied  ·  "
-        f"{phd_counts.get(' ', 0)} todo  ·  "
-        f"{phd_counts.get('-', 0)} rejected  ·  "
-        f"{phd_counts.get('x', 0)} accepted"
-    )
-    ax_phd.text(0.01, 0.97, "PhD",
-                color=TEXT, fontsize=14, fontweight="bold",
-                va="top", transform=ax_phd.transAxes)
-    ax_phd.text(0.01, 0.91, phd_subtitle,
-                color=MUTED, fontsize=8,
-                va="top", transform=ax_phd.transAxes)
+    level1 = []
+    if total_sent > 0:
+        level1.append(("Applied", total_sent,
+                        {"color": C_APPL,
+                         "label_format": "Applied\n{value:.0f}"}))
+    if total_todo > 0:
+        level1.append(("TODO", total_todo,
+                        {"color": C_TODO,
+                         "label_format": "TODO\n{value:.0f}"}))
 
-    _draw_section(ax_phd, phd_items, "", 0.83, ROW_H, MAX_PHD)
+    level2 = []
+    if total_idle > 0:
+        level2.append(("Idle", total_idle,
+                        {"color": C_IDLE, "label_pos": "right",
+                         "label_format": "Idle\n{value:.0f}"}))
+    if total_rejected > 0:
+        level2.append(("Rejected", total_rejected,
+                        {"color": C_REJ, "label_pos": "right",
+                         "label_format": "Rejected\n{value:.0f}"}))
+    if total_accepted > 0:
+        level2.append(("Accepted", total_accepted,
+                        {"color": C_ACC, "label_pos": "right",
+                         "label_format": "Accepted\n{value:.0f}"}))
+
+    flows = []
+    # Job / PhD → Applied (sent) and TODO
+    if j_sent > 0:
+        flows.append(("Job", "Applied", j_sent))
+    if p_sent > 0:
+        flows.append(("PhD", "Applied", p_sent))
+    if jc[" "] > 0:
+        flows.append(("Job", "TODO", jc[" "]))
+    if pc[" "] > 0:
+        flows.append(("PhD", "TODO", pc[" "]))
+    # Applied → Idle / Rejected / Accepted
+    if total_idle > 0:
+        flows.append(("Applied", "Idle", total_idle))
+    if total_rejected > 0:
+        flows.append(("Applied", "Rejected", total_rejected))
+    if total_accepted > 0:
+        flows.append(("Applied", "Accepted", total_accepted))
+
+    nodes = [level0, level1]
+    if level2:
+        nodes.append(level2)
+
+    # ── Sankey (left 58%) ─────────────────────────────────────────────────────
+    ax_s = fig.add_axes([0.02, 0.06, 0.56, 0.84])
+    ax_s.set_facecolor(BG)
+    ax_s.axis("off")
+
+    _Sankey(
+        flows=flows,
+        nodes=nodes,
+        flow_color_mode="dest",
+        flow_color_mode_alpha=0.38,
+        node_width=0.04,
+        node_pad_y_min=0.05,
+        node_pad_y_max=0.14,
+        align_y="justify",
+        node_opts={"fontsize": 13, "color": TEXT},
+        flow_opts={"curvature": 0.45},
+    ).draw(ax=ax_s)
+
+    # ── Application list panel (right 40%) ────────────────────────────────────
+    ax_l = fig.add_axes([0.60, 0.06, 0.38, 0.84])
+    ax_l.set_facecolor(CARD)
+    ax_l.set_xlim(0, 1); ax_l.set_ylim(0, 1)
+    ax_l.axis("off")
+
+    # Show Applied first, then Accepted, then TODO — skip Rejected (noise)
+    show_order   = ["/", "x", " "]
+    section_sep  = 0.04
+    row_h        = 0.062
+    y            = 0.96
+    max_per_sect = 6
+
+    for s in show_order:
+        items_s = (
+            [i for i in job_items if i["status"] == s] +
+            [i for i in phd_items if i["status"] == s]
+        )
+        if not items_s:
+            continue
+
+        name, color = STATUS_NODE[s]
+        ax_l.text(0.04, y, name.upper(), color=color, fontsize=9,
+                  fontweight="bold", va="top", transform=ax_l.transAxes)
+        y -= row_h * 0.85
+
+        for item in items_s[:max_per_sect]:
+            dot   = STATUS_META[s]["dot"]
+            label = item["label"]
+            if len(label) > 38:
+                label = label[:37] + "…"
+            ax_l.text(0.04, y, dot,   color=color, fontsize=10,
+                      va="top", transform=ax_l.transAxes, family="DejaVu Sans")
+            ax_l.text(0.11, y, label, color=TEXT,  fontsize=10,
+                      va="top", transform=ax_l.transAxes)
+            y -= row_h
+            if y < 0.04:
+                break
+
+        remaining = len(items_s) - max_per_sect
+        if remaining > 0:
+            ax_l.text(0.11, y, f"+ {remaining} more…",
+                      color=MUTED, fontsize=9, style="italic",
+                      va="top", transform=ax_l.transAxes)
+            y -= row_h
+
+        y -= section_sep
+        if y < 0.04:
+            break
 
     # ── Bake to pygame surface ─────────────────────────────────────────────────
     canvas = FigureCanvasAgg(fig)
