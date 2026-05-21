@@ -453,11 +453,11 @@ def render_energy(data: dict, W: int, H: int) -> pygame.Surface:
                 va="top", ha="center", fontweight="bold")
     ax_mid.text(0.5, 5.6, "per year", color=MUTED, fontsize=11, va="top", ha="center")
 
-    ax_mid.add_patch(__import__("matplotlib.patches", fromlist=["FancyBboxPatch"])
-                     .FancyBboxPatch((0.1, 2.2), 0.8, 1.8,
-                                     boxstyle="round,pad=0.05",
-                                     facecolor=CARD, edgecolor=BORDER,
-                                     transform=ax_mid.transData))
+    from matplotlib.patches import FancyBboxPatch as _FBP
+    ax_mid.add_patch(_FBP((0.1, 2.2), 0.8, 1.8,
+                          boxstyle="round,pad=0.05",
+                          facecolor=CARD, edgecolor=BORDER,
+                          transform=ax_mid.transData))
     ax_mid.text(0.5, 4.0, f"\u20ac{teilbetrag:.0f}",
                 color=BLUE, fontsize=22, va="top", ha="center", fontweight="bold")
     ax_mid.text(0.5, 2.5, "per Teilbetrag  \u00d7 10",
